@@ -104,3 +104,33 @@ type WorkspaceMember struct {
 	Role        string    `json:"role"`
 	JoinedAt    time.Time `json:"joined_at"`
 }
+
+type Invoice struct {
+	ID                uuid.UUID          `json:"id"`
+	WorkspaceID       uuid.UUID          `json:"workspace_id"`
+	CreatedBy         uuid.UUID          `json:"created_by"`
+	InvoiceNumber     string             `json:"invoice_number"`
+	ClientName        string             `json:"client_name"`
+	ClientContact     string             `json:"client_contact"`
+	Subtitle          string             `json:"subtitle"`
+	DueAt             time.Time          `json:"due_at"`
+	Amount            int64              `json:"amount"`
+	Status            string             `json:"status"`
+	Notes             string             `json:"notes"`
+	IssuedAt          time.Time          `json:"issued_at"`
+	PaidAt            pgtype.Timestamptz `json:"paid_at"`
+	PaidTransactionID uuid.NullUUID      `json:"paid_transaction_id"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+}
+
+type InvoiceLineItem struct {
+	ID        uuid.UUID `json:"id"`
+	InvoiceID uuid.UUID `json:"invoice_id"`
+	Name      string    `json:"name"`
+	Quantity  int32     `json:"quantity"`
+	UnitPrice int64     `json:"unit_price"`
+	Subtotal  int64     `json:"subtotal"`
+	SortOrder int32     `json:"sort_order"`
+}

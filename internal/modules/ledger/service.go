@@ -511,6 +511,11 @@ func deriveShortName(name, shortName string) string {
 	return name
 }
 
+// MapWorkspaces maps sqlc workspace rows into auth.WorkspaceDTO slices.
+func MapWorkspaces(rows []sqlc.ListWorkspacesByUserIDRow, planTier string) []auth.WorkspaceDTO {
+	return mapWorkspaces(rows, planTier)
+}
+
 func mapWorkspaces(rows []sqlc.ListWorkspacesByUserIDRow, planTier string) []auth.WorkspaceDTO {
 	isPro := planTier == "umkm_pro" || planTier == "keluarga_pro"
 	out := make([]auth.WorkspaceDTO, 0, len(rows))
@@ -630,6 +635,11 @@ func formatWIBLabels(t time.Time, now time.Time) (timeLabel, dateGroup string) {
 		return timeLabel, "Kemarin"
 	}
 	return timeLabel, fmt.Sprintf("%d %s %d", d1, indonesianMonths[int(m1)], y1)
+}
+
+// ToTransactionDTO converts a sqlc CashTransaction and its line items into a TransactionDTO.
+func ToTransactionDTO(tx sqlc.CashTransaction, items []sqlc.TransactionLineItem, now time.Time) TransactionDTO {
+	return toTransactionDTO(tx, items, now)
 }
 
 func toTransactionDTO(tx sqlc.CashTransaction, items []sqlc.TransactionLineItem, now time.Time) TransactionDTO {

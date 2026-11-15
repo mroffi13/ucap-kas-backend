@@ -9,6 +9,7 @@ import (
 	"github.com/artech/ucapkas_backend/internal/middleware"
 	"github.com/artech/ucapkas_backend/internal/modules/ai"
 	"github.com/artech/ucapkas_backend/internal/modules/auth"
+	"github.com/artech/ucapkas_backend/internal/modules/invoice"
 	"github.com/artech/ucapkas_backend/internal/modules/ledger"
 	"github.com/artech/ucapkas_backend/internal/pkg/jwtutil"
 	"github.com/artech/ucapkas_backend/internal/pkg/response"
@@ -28,6 +29,7 @@ func NewRouter(
 	authHandler *auth.Handler,
 	ledgerHandler *ledger.Handler,
 	aiHandler *ai.Handler,
+	invoiceHandler *invoice.Handler,
 ) http.Handler {
 	r := chi.NewRouter()
 
@@ -92,6 +94,17 @@ func NewRouter(
 						air.Get("/quota", aiHandler.GetQuota)
 						air.Post("/parse-voice", aiHandler.ParseVoice)
 						air.Post("/parse-receipt", aiHandler.ParseReceipt)
+					})
+				}
+
+				if invoiceHandler != nil {
+					wr.Route("/{workspaceID}/invoices", func(ir chi.Router) {
+						ir.Get("/", invoiceHandler.ListInvoices)
+						ir.Post("/", invoiceHandler.CreateInvoice)
+						ir.Get("/{invoiceID}/pdf", invoiceHandler.DownloadPDF)
+						ir.Patch("/{invoiceID}", invoiceHandler.UpdateInvoice)
+						ir.Post("/{invoiceID}/mark-paid", invoiceHandler.MarkInvoicePaid)
+						ir.Delete("/{invoiceID}", invoiceHandler.DeleteInvoice)
 					})
 				}
 			})

@@ -14,6 +14,7 @@ import (
 	"github.com/artech/ucapkas_backend/internal/db"
 	"github.com/artech/ucapkas_backend/internal/modules/ai"
 	"github.com/artech/ucapkas_backend/internal/modules/auth"
+	"github.com/artech/ucapkas_backend/internal/modules/invoice"
 	"github.com/artech/ucapkas_backend/internal/modules/ledger"
 	"github.com/artech/ucapkas_backend/internal/pkg/jwtutil"
 	"github.com/artech/ucapkas_backend/internal/server"
@@ -92,7 +93,11 @@ func main() {
 	aiSvc := ai.NewService(aiStore, aiParser)
 	aiHandler := ai.NewHandler(aiSvc)
 
-	router := server.NewRouter(cfg, pool, jwtMgr, authHandler, ledgerHandler, aiHandler)
+	invoiceStore := invoice.NewPgStore(pool)
+	invoiceSvc := invoice.NewService(invoiceStore)
+	invoiceHandler := invoice.NewHandler(invoiceSvc)
+
+	router := server.NewRouter(cfg, pool, jwtMgr, authHandler, ledgerHandler, aiHandler, invoiceHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
