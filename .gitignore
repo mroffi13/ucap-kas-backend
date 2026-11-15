@@ -1,0 +1,15 @@
+# Local env & secrets (NEVER commit .env)
+.env
+.env.*
+!.env.example
+
+# Compiled binaries & Air temp dir
+bin/
+tmp/
+ucapkas-api
+*.exe
+*.test
+*.out
+
+# OS files
+.DS_Store

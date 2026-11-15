@@ -1,0 +1,31 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "setup_token": "env.BIFROST_SETUP_TOKEN",
+  "client": {
+    "enable_logging": true,
+    "enforce_auth_on_inference": false,
+    "initial_pool_size": 100
+  },
+  "providers": {
+    "groq": {
+      "keys": [
+        {
+          "name": "groq-primary",
+          "value": "env.GROQ_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ]
+    },
+    "gemini": {
+      "keys": [
+        {
+          "name": "gemini-primary",
+          "value": "env.GEMINI_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ]
+    }
+  }
+}

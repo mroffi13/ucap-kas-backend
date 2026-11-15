@@ -1,0 +1,26 @@
+root = "."
+tmp_dir = "/tmp/air"
+
+[build]
+  cmd = "go build -o /tmp/air/ucapkas-api ./cmd/api"
+  bin = "/tmp/air/ucapkas-api"
+  delay = 400
+  include_ext = ["go", "sql", "env"]
+  exclude_dir = ["bin", "tmp", ".git", "docs"]
+  exclude_regex = ["_test\\.go$"]
+  exclude_unchanged = true
+  kill_delay = "2s"
+  send_interrupt = true
+  stop_on_error = true
+
+[log]
+  time = true
+
+[color]
+  main = "cyan"
+  watcher = "yellow"
+  build = "green"
+  runner = "magenta"
+
+[misc]
+  clean_on_exit = true

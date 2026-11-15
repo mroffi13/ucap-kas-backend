@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ucapkas_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ucapkas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ucapkas_local_dev_pw}
+      POSTGRES_DB: ucapkas
+      TZ: Asia/Jakarta
+    ports:
+      - "127.0.0.1:5432:5432"
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c work_mem=4MB
+      -c max_connections=50
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ucapkas -d ucapkas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bifrost:
+    image: maximhq/bifrost:latest
+    container_name: ucapkas_bifrost
+    restart: unless-stopped
+    environment:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8080"
+      LOG_LEVEL: info
+      BIFROST_SETUP_TOKEN: ${BIFROST_SETUP_TOKEN:-ucapkas-bifrost-setup}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - ./bifrost/config.json:/app/data/config.json:ro
+      - bifrost_data:/app/data
+
+  api:
+    image: ucapkas_backend-api:prod
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    container_name: ucapkas_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bifrost:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      PORT: "8080"
+      DATABASE_URL: postgres://ucapkas:${POSTGRES_PASSWORD:-ucapkas_local_dev_pw}@postgres:5432/ucapkas?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
+      GOOGLE_CLIENT_IDS: ${GOOGLE_CLIENT_IDS:-}
+      ALLOW_DEV_MOCK_AUTH: "false"
+      AI_GATEWAY_URL: ${AI_GATEWAY_URL:-http://bifrost:8080/v1}
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  pgdata:
+  bifrost_data:
