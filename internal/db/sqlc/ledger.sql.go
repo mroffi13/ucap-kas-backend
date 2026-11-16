@@ -279,9 +279,11 @@ SET
     bank_name = $5,
     bank_account_number = $6,
     bank_account_holder = $7,
+    logo_url = $8,
+    quick_categories = $9,
     updated_at = NOW()
 WHERE id = $1
-RETURNING id, owner_id, name, short_name, focus_type, bank_name, bank_account_number, bank_account_holder, is_default, created_at, updated_at
+RETURNING id, owner_id, name, short_name, focus_type, bank_name, bank_account_number, bank_account_holder, logo_url, quick_categories, is_default, created_at, updated_at
 `
 
 type UpdateWorkspaceCustomParams struct {
@@ -292,6 +294,8 @@ type UpdateWorkspaceCustomParams struct {
 	BankName          string    `json:"bank_name"`
 	BankAccountNumber string    `json:"bank_account_number"`
 	BankAccountHolder string    `json:"bank_account_holder"`
+	LogoUrl           string    `json:"logo_url"`
+	QuickCategories   []byte    `json:"quick_categories"`
 }
 
 func (q *Queries) UpdateWorkspaceCustom(ctx context.Context, arg UpdateWorkspaceCustomParams) (Workspace, error) {
@@ -303,6 +307,8 @@ func (q *Queries) UpdateWorkspaceCustom(ctx context.Context, arg UpdateWorkspace
 		arg.BankName,
 		arg.BankAccountNumber,
 		arg.BankAccountHolder,
+		arg.LogoUrl,
+		arg.QuickCategories,
 	)
 	var i Workspace
 	err := row.Scan(
@@ -314,9 +320,331 @@ func (q *Queries) UpdateWorkspaceCustom(ctx context.Context, arg UpdateWorkspace
 		&i.BankName,
 		&i.BankAccountNumber,
 		&i.BankAccountHolder,
+		&i.LogoUrl,
+		&i.QuickCategories,
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const getWorkspaceByID = `-- name: GetWorkspaceByID :one
+SELECT id, owner_id, name, short_name, focus_type, bank_name, bank_account_number, bank_account_holder, logo_url, quick_categories, is_default, created_at, updated_at
+FROM workspaces
+WHERE id = $1
+LIMIT 1
+`
+
+func (q *Queries) GetWorkspaceByID(ctx context.Context, id uuid.UUID) (Workspace, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceByID, id)
+	var i Workspace
+	err := row.Scan(
+		&i.ID,
+		&i.OwnerID,
+		&i.Name,
+		&i.ShortName,
+		&i.FocusType,
+		&i.BankName,
+		&i.BankAccountNumber,
+		&i.BankAccountHolder,
+		&i.LogoUrl,
+		&i.QuickCategories,
+		&i.IsDefault,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const listWorkspaceMembersWithProfile = `-- name: ListWorkspaceMembersWithProfile :many
+SELECT
+    wm.workspace_id,
+    wm.user_id,
+    wm.role,
+    wm.joined_at,
+    u.email,
+    u.full_name,
+    u.avatar_url
+FROM workspace_members wm
+JOIN users u ON u.id = wm.user_id
+WHERE wm.workspace_id = $1
+ORDER BY CASE WHEN wm.role = 'owner' THEN 0 ELSE 1 END, wm.joined_at ASC
+`
+
+type ListWorkspaceMembersWithProfileRow struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
+	Role        string    `json:"role"`
+	JoinedAt    time.Time `json:"joined_at"`
+	Email       string    `json:"email"`
+	FullName    string    `json:"full_name"`
+	AvatarUrl   string    `json:"avatar_url"`
+}
+
+func (q *Queries) ListWorkspaceMembersWithProfile(ctx context.Context, workspaceID uuid.UUID) ([]ListWorkspaceMembersWithProfileRow, error) {
+	rows, err := q.db.Query(ctx, listWorkspaceMembersWithProfile, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWorkspaceMembersWithProfileRow
+	for rows.Next() {
+		var i ListWorkspaceMembersWithProfileRow
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.UserID,
+			&i.Role,
+			&i.JoinedAt,
+			&i.Email,
+			&i.FullName,
+			&i.AvatarUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countWorkspaceMembers = `-- name: CountWorkspaceMembers :one
+SELECT COUNT(*)::INT
+FROM workspace_members
+WHERE workspace_id = $1
+`
+
+func (q *Queries) CountWorkspaceMembers(ctx context.Context, workspaceID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, countWorkspaceMembers, workspaceID)
+	var count int32
+	err := row.Scan(&count)
+	return count, err
+}
+
+const removeWorkspaceMember = `-- name: RemoveWorkspaceMember :execrows
+DELETE FROM workspace_members
+WHERE workspace_id = $1 AND user_id = $2 AND role <> 'owner'
+`
+
+type RemoveWorkspaceMemberParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	UserID      uuid.UUID `json:"user_id"`
+}
+
+func (q *Queries) RemoveWorkspaceMember(ctx context.Context, arg RemoveWorkspaceMemberParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeWorkspaceMember, arg.WorkspaceID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const revokeActiveWorkspaceInvites = `-- name: RevokeActiveWorkspaceInvites :exec
+UPDATE workspace_invites
+SET revoked_at = NOW()
+WHERE workspace_id = $1 AND used_by IS NULL AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeActiveWorkspaceInvites(ctx context.Context, workspaceID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, revokeActiveWorkspaceInvites, workspaceID)
+	return err
+}
+
+const createWorkspaceInvite = `-- name: CreateWorkspaceInvite :one
+INSERT INTO workspace_invites (
+    id, workspace_id, created_by, token, role, expires_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6
+)
+RETURNING id, workspace_id, created_by, token, role, expires_at, used_by, used_at, revoked_at, created_at
+`
+
+type CreateWorkspaceInviteParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	CreatedBy   uuid.UUID `json:"created_by"`
+	Token       string    `json:"token"`
+	Role        string    `json:"role"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+func (q *Queries) CreateWorkspaceInvite(ctx context.Context, arg CreateWorkspaceInviteParams) (WorkspaceInvite, error) {
+	row := q.db.QueryRow(ctx, createWorkspaceInvite,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.CreatedBy,
+		arg.Token,
+		arg.Role,
+		arg.ExpiresAt,
+	)
+	var i WorkspaceInvite
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CreatedBy,
+		&i.Token,
+		&i.Role,
+		&i.ExpiresAt,
+		&i.UsedBy,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getActiveWorkspaceInviteByWorkspace = `-- name: GetActiveWorkspaceInviteByWorkspace :one
+SELECT id, workspace_id, created_by, token, role, expires_at, used_by, used_at, revoked_at, created_at
+FROM workspace_invites
+WHERE workspace_id = $1
+  AND used_by IS NULL
+  AND revoked_at IS NULL
+  AND expires_at > NOW()
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+func (q *Queries) GetActiveWorkspaceInviteByWorkspace(ctx context.Context, workspaceID uuid.UUID) (WorkspaceInvite, error) {
+	row := q.db.QueryRow(ctx, getActiveWorkspaceInviteByWorkspace, workspaceID)
+	var i WorkspaceInvite
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CreatedBy,
+		&i.Token,
+		&i.Role,
+		&i.ExpiresAt,
+		&i.UsedBy,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getWorkspaceInviteByTokenForUpdate = `-- name: GetWorkspaceInviteByTokenForUpdate :one
+SELECT id, workspace_id, created_by, token, role, expires_at, used_by, used_at, revoked_at, created_at
+FROM workspace_invites
+WHERE token = $1
+LIMIT 1
+FOR UPDATE
+`
+
+func (q *Queries) GetWorkspaceInviteByTokenForUpdate(ctx context.Context, token string) (WorkspaceInvite, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceInviteByTokenForUpdate, token)
+	var i WorkspaceInvite
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CreatedBy,
+		&i.Token,
+		&i.Role,
+		&i.ExpiresAt,
+		&i.UsedBy,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const markWorkspaceInviteUsed = `-- name: MarkWorkspaceInviteUsed :one
+UPDATE workspace_invites
+SET used_by = $2, used_at = NOW()
+WHERE id = $1 AND used_by IS NULL AND revoked_at IS NULL
+RETURNING id, workspace_id, created_by, token, role, expires_at, used_by, used_at, revoked_at, created_at
+`
+
+type MarkWorkspaceInviteUsedParams struct {
+	ID     uuid.UUID     `json:"id"`
+	UsedBy uuid.NullUUID `json:"used_by"`
+}
+
+func (q *Queries) MarkWorkspaceInviteUsed(ctx context.Context, arg MarkWorkspaceInviteUsedParams) (WorkspaceInvite, error) {
+	row := q.db.QueryRow(ctx, markWorkspaceInviteUsed, arg.ID, arg.UsedBy)
+	var i WorkspaceInvite
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.CreatedBy,
+		&i.Token,
+		&i.Role,
+		&i.ExpiresAt,
+		&i.UsedBy,
+		&i.UsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listWorkspaceAuditLogsWithUser = `-- name: ListWorkspaceAuditLogsWithUser :many
+SELECT
+    al.id,
+    al.user_id,
+    al.workspace_id,
+    al.action,
+    al.ip_address,
+    al.metadata_json,
+    al.created_at,
+    COALESCE(u.full_name, 'Pengguna') AS actor_name,
+    COALESCE(u.email, '') AS actor_email,
+    COALESCE(u.avatar_url, '') AS actor_avatar_url
+FROM audit_logs al
+LEFT JOIN users u ON u.id = al.user_id
+WHERE al.workspace_id = $1
+ORDER BY al.created_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListWorkspaceAuditLogsWithUserParams struct {
+	WorkspaceID uuid.NullUUID `json:"workspace_id"`
+	Limit       int32         `json:"limit"`
+	Offset      int32         `json:"offset"`
+}
+
+type ListWorkspaceAuditLogsWithUserRow struct {
+	ID             uuid.UUID     `json:"id"`
+	UserID         uuid.NullUUID `json:"user_id"`
+	WorkspaceID    uuid.NullUUID `json:"workspace_id"`
+	Action         string        `json:"action"`
+	IpAddress      string        `json:"ip_address"`
+	MetadataJson   []byte        `json:"metadata_json"`
+	CreatedAt      time.Time     `json:"created_at"`
+	ActorName      string        `json:"actor_name"`
+	ActorEmail     string        `json:"actor_email"`
+	ActorAvatarUrl string        `json:"actor_avatar_url"`
+}
+
+func (q *Queries) ListWorkspaceAuditLogsWithUser(ctx context.Context, arg ListWorkspaceAuditLogsWithUserParams) ([]ListWorkspaceAuditLogsWithUserRow, error) {
+	rows, err := q.db.Query(ctx, listWorkspaceAuditLogsWithUser, arg.WorkspaceID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListWorkspaceAuditLogsWithUserRow
+	for rows.Next() {
+		var i ListWorkspaceAuditLogsWithUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.WorkspaceID,
+			&i.Action,
+			&i.IpAddress,
+			&i.MetadataJson,
+			&i.CreatedAt,
+			&i.ActorName,
+			&i.ActorEmail,
+			&i.ActorAvatarUrl,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

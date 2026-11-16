@@ -78,7 +78,7 @@ INSERT INTO workspaces (
 ) VALUES (
     $1, $2, $3, $4, $5, $6
 )
-RETURNING id, owner_id, name, short_name, focus_type, bank_name, bank_account_number, bank_account_holder, is_default, created_at, updated_at
+RETURNING id, owner_id, name, short_name, focus_type, bank_name, bank_account_number, bank_account_holder, logo_url, quick_categories, is_default, created_at, updated_at
 `
 
 type CreateWorkspaceParams struct {
@@ -109,6 +109,8 @@ func (q *Queries) CreateWorkspace(ctx context.Context, arg CreateWorkspaceParams
 		&i.BankName,
 		&i.BankAccountNumber,
 		&i.BankAccountHolder,
+		&i.LogoUrl,
+		&i.QuickCategories,
 		&i.IsDefault,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -199,6 +201,8 @@ SELECT
     w.bank_name,
     w.bank_account_number,
     w.bank_account_holder,
+    w.logo_url,
+    w.quick_categories,
     w.is_default,
     wm.role,
     COALESCE(SUM(CASE
@@ -217,7 +221,19 @@ SELECT
              AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta')
         THEN ct.amount
         ELSE 0
-    END), 0)::BIGINT AS monthly_outflow
+    END), 0)::BIGINT AS monthly_outflow,
+    COALESCE(SUM(CASE
+        WHEN ct.id IS NOT NULL AND ct.deleted_at IS NULL AND ct.type = 'inflow'
+             AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta') - INTERVAL '1 month'
+        THEN ct.amount
+        ELSE 0
+    END), 0)::BIGINT AS prev_monthly_inflow,
+    COALESCE(SUM(CASE
+        WHEN ct.id IS NOT NULL AND ct.deleted_at IS NULL AND ct.type = 'outflow'
+             AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta') - INTERVAL '1 month'
+        THEN ct.amount
+        ELSE 0
+    END), 0)::BIGINT AS prev_monthly_outflow
 FROM workspaces w
 JOIN workspace_members wm ON wm.workspace_id = w.id
 LEFT JOIN cash_transactions ct ON ct.workspace_id = w.id AND ct.deleted_at IS NULL
@@ -227,19 +243,23 @@ ORDER BY w.is_default DESC, w.created_at ASC
 `
 
 type ListWorkspacesByUserIDRow struct {
-	ID                uuid.UUID `json:"id"`
-	OwnerID           uuid.UUID `json:"owner_id"`
-	Name              string    `json:"name"`
-	ShortName         string    `json:"short_name"`
-	FocusType         string    `json:"focus_type"`
-	BankName          string    `json:"bank_name"`
-	BankAccountNumber string    `json:"bank_account_number"`
-	BankAccountHolder string    `json:"bank_account_holder"`
-	IsDefault         bool      `json:"is_default"`
-	Role              string    `json:"role"`
-	Balance           int64     `json:"balance"`
-	MonthlyInflow     int64     `json:"monthly_inflow"`
-	MonthlyOutflow    int64     `json:"monthly_outflow"`
+	ID                 uuid.UUID `json:"id"`
+	OwnerID            uuid.UUID `json:"owner_id"`
+	Name               string    `json:"name"`
+	ShortName          string    `json:"short_name"`
+	FocusType          string    `json:"focus_type"`
+	BankName           string    `json:"bank_name"`
+	BankAccountNumber  string    `json:"bank_account_number"`
+	BankAccountHolder  string    `json:"bank_account_holder"`
+	LogoUrl            string    `json:"logo_url"`
+	QuickCategories    []byte    `json:"quick_categories"`
+	IsDefault          bool      `json:"is_default"`
+	Role               string    `json:"role"`
+	Balance            int64     `json:"balance"`
+	MonthlyInflow      int64     `json:"monthly_inflow"`
+	MonthlyOutflow     int64     `json:"monthly_outflow"`
+	PrevMonthlyInflow  int64     `json:"prev_monthly_inflow"`
+	PrevMonthlyOutflow int64     `json:"prev_monthly_outflow"`
 }
 
 func (q *Queries) ListWorkspacesByUserID(ctx context.Context, userID uuid.UUID) ([]ListWorkspacesByUserIDRow, error) {
@@ -260,11 +280,15 @@ func (q *Queries) ListWorkspacesByUserID(ctx context.Context, userID uuid.UUID) 
 			&i.BankName,
 			&i.BankAccountNumber,
 			&i.BankAccountHolder,
+			&i.LogoUrl,
+			&i.QuickCategories,
 			&i.IsDefault,
 			&i.Role,
 			&i.Balance,
 			&i.MonthlyInflow,
 			&i.MonthlyOutflow,
+			&i.PrevMonthlyInflow,
+			&i.PrevMonthlyOutflow,
 		); err != nil {
 			return nil, err
 		}

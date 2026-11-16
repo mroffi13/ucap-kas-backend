@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/artech/ucapkas_backend/internal/middleware"
@@ -21,6 +22,7 @@ type googleSignInRequest struct {
 	IDToken       string `json:"id_token"`
 	SelectedFocus string `json:"selected_focus"`
 	DeviceName    string `json:"device_name"`
+	AvatarURL     string `json:"avatar_url"`
 }
 
 func (h *Handler) GoogleSignIn(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +40,10 @@ func (h *Handler) GoogleSignIn(w http.ResponseWriter, r *http.Request) {
 		req.SelectedFocus,
 		req.DeviceName,
 		middleware.ClientIP(r),
+		req.AvatarURL,
 	)
 	if err != nil {
+		slog.Error("google sign-in failed", "error", err)
 		if errors.Is(err, ErrInvalidGoogleToken) {
 			response.Error(w, http.StatusUnauthorized, "INVALID_GOOGLE_TOKEN", "Verifikasi akun Google gagal. Silakan coba lagi.")
 			return

@@ -25,6 +25,62 @@ func (q *Queries) CountMonthlyAIUsageByUser(ctx context.Context, userID uuid.UUI
 	return usage_count, err
 }
 
+const getWorkspaceOwnerUser = `-- name: GetWorkspaceOwnerUser :one
+SELECT u.id, u.google_sub, u.email, u.full_name, u.avatar_url, u.plan_tier, u.plan_expires_at, u.extra_ai_quota, u.created_at, u.updated_at
+FROM workspaces w
+JOIN users u ON u.id = w.owner_id
+WHERE w.id = $1
+LIMIT 1
+`
+
+func (q *Queries) GetWorkspaceOwnerUser(ctx context.Context, workspaceID uuid.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceOwnerUser, workspaceID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.GoogleSub,
+		&i.Email,
+		&i.FullName,
+		&i.AvatarUrl,
+		&i.PlanTier,
+		&i.PlanExpiresAt,
+		&i.ExtraAiQuota,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const countMonthlyAIUsageByOwner = `-- name: CountMonthlyAIUsageByOwner :one
+SELECT COUNT(*)::BIGINT AS usage_count
+FROM ai_usage_logs l
+JOIN workspaces w ON w.id = l.workspace_id
+WHERE w.owner_id = $1
+  AND l.created_at >= date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta') AT TIME ZONE 'Asia/Jakarta'
+`
+
+func (q *Queries) CountMonthlyAIUsageByOwner(ctx context.Context, ownerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countMonthlyAIUsageByOwner, ownerID)
+	var usage_count int64
+	err := row.Scan(&usage_count)
+	return usage_count, err
+}
+
+const countWeeklyAIUsageByOwner = `-- name: CountWeeklyAIUsageByOwner :one
+SELECT COUNT(*)::BIGINT AS usage_count
+FROM ai_usage_logs l
+JOIN workspaces w ON w.id = l.workspace_id
+WHERE w.owner_id = $1
+  AND l.created_at >= date_trunc('week', NOW() AT TIME ZONE 'Asia/Jakarta') AT TIME ZONE 'Asia/Jakarta'
+`
+
+func (q *Queries) CountWeeklyAIUsageByOwner(ctx context.Context, ownerID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countWeeklyAIUsageByOwner, ownerID)
+	var usage_count int64
+	err := row.Scan(&usage_count)
+	return usage_count, err
+}
+
 const insertAIUsageLog = `-- name: InsertAIUsageLog :one
 INSERT INTO ai_usage_logs (
     id, workspace_id, user_id, feature_type, provider, tokens_used

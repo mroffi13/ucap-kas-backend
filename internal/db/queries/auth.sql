@@ -24,6 +24,8 @@ SELECT
     w.bank_name,
     w.bank_account_number,
     w.bank_account_holder,
+    w.logo_url,
+    w.quick_categories,
     w.is_default,
     wm.role,
     COALESCE(SUM(CASE
@@ -42,7 +44,19 @@ SELECT
              AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta')
         THEN ct.amount
         ELSE 0
-    END), 0)::BIGINT AS monthly_outflow
+    END), 0)::BIGINT AS monthly_outflow,
+    COALESCE(SUM(CASE
+        WHEN ct.id IS NOT NULL AND ct.deleted_at IS NULL AND ct.type = 'inflow'
+             AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta') - INTERVAL '1 month'
+        THEN ct.amount
+        ELSE 0
+    END), 0)::BIGINT AS prev_monthly_inflow,
+    COALESCE(SUM(CASE
+        WHEN ct.id IS NOT NULL AND ct.deleted_at IS NULL AND ct.type = 'outflow'
+             AND date_trunc('month', ct.transaction_at AT TIME ZONE 'Asia/Jakarta') = date_trunc('month', NOW() AT TIME ZONE 'Asia/Jakarta') - INTERVAL '1 month'
+        THEN ct.amount
+        ELSE 0
+    END), 0)::BIGINT AS prev_monthly_outflow
 FROM workspaces w
 JOIN workspace_members wm ON wm.workspace_id = w.id
 LEFT JOIN cash_transactions ct ON ct.workspace_id = w.id AND ct.deleted_at IS NULL

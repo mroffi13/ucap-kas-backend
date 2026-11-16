@@ -13,6 +13,7 @@ import (
 
 	"github.com/artech/ucapkas_backend/internal/db/sqlc"
 	"github.com/artech/ucapkas_backend/internal/middleware"
+	"github.com/artech/ucapkas_backend/internal/modules/auth"
 	"github.com/artech/ucapkas_backend/internal/modules/invoice"
 	"github.com/artech/ucapkas_backend/internal/pkg/jwtutil"
 	"github.com/go-chi/chi/v5"
@@ -523,5 +524,20 @@ func TestInvoiceLifecycleAndSync(t *testing.T) {
 	}
 	if !bytes.HasPrefix(pdfRec.Body.Bytes(), []byte("%PDF-1.4")) {
 		t.Fatalf("expected valid PDF header, got prefix %q", pdfRec.Body.Bytes()[:16])
+	}
+	// Seeded owner in this test is umkm_pro -> PDF must NOT contain the UcapKas Play Store watermark
+	if bytes.Contains(pdfRec.Body.Bytes(), []byte("Invoice dibuat oleh aplikasi UcapKas, tersedia di Play Store gratis")) {
+		t.Fatalf("expected Pro invoice PDF to omit UcapKas Play Store watermark")
+	}
+
+	// Starter plan PDF must contain the UcapKas Play Store watermark
+	starterPDF, _ := invoice.RenderInvoicePDF(ovResp.Data.Invoice, auth.WorkspaceDTO{
+		ID:        wsID.String(),
+		Name:      "Bengkel Jaya Starter",
+		ShortName: "BJ",
+		IsPro:     false,
+	})
+	if !bytes.Contains(starterPDF, []byte("Invoice dibuat oleh aplikasi UcapKas, tersedia di Play Store gratis")) {
+		t.Fatalf("expected Starter invoice PDF to contain UcapKas Play Store watermark")
 	}
 }

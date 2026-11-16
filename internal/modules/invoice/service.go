@@ -771,9 +771,6 @@ func (s *Service) CreateInvoice(
 
 	dueDateLabel := strings.TrimSpace(input.DueDateLabel)
 	clientContact := strings.TrimSpace(input.ClientContact)
-	if clientContact == "" {
-		clientContact = "WA Pelanggan"
-	}
 
 	now := time.Now().UTC()
 	dueAt := resolveDueAt(input.DueAt, dueDateLabel, now)

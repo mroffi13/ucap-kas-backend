@@ -16,6 +16,7 @@ import (
 	"github.com/artech/ucapkas_backend/internal/pkg/jwtutil"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type memoryLedgerStore struct {
@@ -23,6 +24,8 @@ type memoryLedgerStore struct {
 	users        map[uuid.UUID]sqlc.User
 	workspaces   map[uuid.UUID]sqlc.Workspace
 	members      map[uuid.UUID]map[uuid.UUID]string // wsID -> userID -> role
+	invites      map[string]sqlc.WorkspaceInvite    // token -> invite
+	auditLogs    []sqlc.ListWorkspaceAuditLogsWithUserRow
 	transactions map[uuid.UUID][]sqlc.CashTransaction
 	lineItems    map[uuid.UUID][]sqlc.TransactionLineItem
 }
@@ -32,8 +35,20 @@ func newMemoryLedgerStore() *memoryLedgerStore {
 		users:        make(map[uuid.UUID]sqlc.User),
 		workspaces:   make(map[uuid.UUID]sqlc.Workspace),
 		members:      make(map[uuid.UUID]map[uuid.UUID]string),
+		invites:      make(map[string]sqlc.WorkspaceInvite),
 		transactions: make(map[uuid.UUID][]sqlc.CashTransaction),
 		lineItems:    make(map[uuid.UUID][]sqlc.TransactionLineItem),
+	}
+}
+
+func (m *memoryLedgerStore) seedUser(userID uuid.UUID, email, fullName, planTier string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.users[userID] = sqlc.User{
+		ID:       userID,
+		Email:    email,
+		FullName: fullName,
+		PlanTier: planTier,
 	}
 }
 
@@ -94,6 +109,8 @@ func (m *memoryLedgerStore) buildWorkspaceRowsLocked(userID uuid.UUID) []sqlc.Li
 			BankName:          ws.BankName,
 			BankAccountNumber: ws.BankAccountNumber,
 			BankAccountHolder: ws.BankAccountHolder,
+			LogoUrl:           ws.LogoUrl,
+			QuickCategories:   ws.QuickCategories,
 			IsDefault:         ws.IsDefault,
 			Role:              role,
 			Balance:           balance,
@@ -135,6 +152,7 @@ func (m *memoryLedgerStore) CreateWorkspaceTx(
 	}
 
 	wsID, _ := uuid.NewV7()
+	qcBytes, _ := json.Marshal(input.QuickCategories)
 	ws := sqlc.Workspace{
 		ID:                wsID,
 		OwnerID:           userID,
@@ -144,6 +162,7 @@ func (m *memoryLedgerStore) CreateWorkspaceTx(
 		BankName:          input.BankName,
 		BankAccountNumber: input.BankAccountNumber,
 		BankAccountHolder: input.BankAccountHolder,
+		QuickCategories:   qcBytes,
 		IsDefault:         owned == 0,
 	}
 	m.workspaces[wsID] = ws
@@ -172,6 +191,13 @@ func (m *memoryLedgerStore) UpdateWorkspaceTx(
 	ws.BankName = input.BankName
 	ws.BankAccountNumber = input.BankAccountNumber
 	ws.BankAccountHolder = input.BankAccountHolder
+	qcBytes, _ := json.Marshal(input.QuickCategories)
+	ws.QuickCategories = qcBytes
+	if m.users[userID].PlanTier == "umkm_pro" || m.users[userID].PlanTier == "keluarga_pro" {
+		ws.LogoUrl = input.LogoURL
+	} else {
+		ws.LogoUrl = ""
+	}
 	m.workspaces[workspaceID] = ws
 	return m.users[userID], ws, m.buildWorkspaceRowsLocked(userID), nil
 }
@@ -272,6 +298,213 @@ func (m *memoryLedgerStore) SoftDeleteTransactionTx(
 	}
 	m.transactions[workspaceID] = txs
 	return m.users[userID], m.buildWorkspaceRowsLocked(userID), nil
+}
+
+func (m *memoryLedgerStore) buildMemberRowsLocked(workspaceID uuid.UUID) []sqlc.ListWorkspaceMembersWithProfileRow {
+	var rows []sqlc.ListWorkspaceMembersWithProfileRow
+	for uid, role := range m.members[workspaceID] {
+		u := m.users[uid]
+		rows = append(rows, sqlc.ListWorkspaceMembersWithProfileRow{
+			WorkspaceID: workspaceID,
+			UserID:      uid,
+			Role:        role,
+			JoinedAt:    time.Now().UTC(),
+			Email:       u.Email,
+			FullName:    u.FullName,
+			AvatarUrl:   u.AvatarUrl,
+		})
+	}
+	return rows
+}
+
+func (m *memoryLedgerStore) ListMembers(
+	_ context.Context,
+	userID, workspaceID uuid.UUID,
+) ([]sqlc.ListWorkspaceMembersWithProfileRow, sqlc.User, *sqlc.WorkspaceInvite, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	role, ok := m.members[workspaceID][userID]
+	if !ok {
+		return nil, sqlc.User{}, nil, "", ledger.ErrForbidden
+	}
+	ws, ok := m.workspaces[workspaceID]
+	if !ok {
+		return nil, sqlc.User{}, nil, "", ledger.ErrNotFound
+	}
+	owner := m.users[ws.OwnerID]
+	var activeInv *sqlc.WorkspaceInvite
+	if role == "owner" {
+		for _, inv := range m.invites {
+			if inv.WorkspaceID == workspaceID && !inv.UsedBy.Valid && !inv.RevokedAt.Valid && time.Now().UTC().Before(inv.ExpiresAt) {
+				cp := inv
+				activeInv = &cp
+				break
+			}
+		}
+	}
+	return m.buildMemberRowsLocked(workspaceID), owner, activeInv, role, nil
+}
+
+func (m *memoryLedgerStore) CreateInviteTx(
+	_ context.Context,
+	userID, workspaceID uuid.UUID,
+	token string,
+	expiresAt time.Time,
+	ipAddr string,
+) (sqlc.WorkspaceInvite, sqlc.Workspace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.members[workspaceID][userID] != "owner" {
+		return sqlc.WorkspaceInvite{}, sqlc.Workspace{}, ledger.ErrForbidden
+	}
+	ws, ok := m.workspaces[workspaceID]
+	if !ok {
+		return sqlc.WorkspaceInvite{}, sqlc.Workspace{}, ledger.ErrNotFound
+	}
+	owner := m.users[ws.OwnerID]
+	maxMembers := 2
+	if owner.PlanTier == "umkm_pro" || owner.PlanTier == "keluarga_pro" {
+		maxMembers = 5
+	}
+	if len(m.members[workspaceID]) >= maxMembers {
+		return sqlc.WorkspaceInvite{}, sqlc.Workspace{}, ledger.ErrMemberLimitReached
+	}
+	for k, inv := range m.invites {
+		if inv.WorkspaceID == workspaceID && !inv.UsedBy.Valid && !inv.RevokedAt.Valid {
+			inv.RevokedAt = pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
+			m.invites[k] = inv
+		}
+	}
+	invID, _ := uuid.NewV7()
+	created := sqlc.WorkspaceInvite{
+		ID:          invID,
+		WorkspaceID: workspaceID,
+		CreatedBy:   userID,
+		Token:       token,
+		Role:        "editor",
+		ExpiresAt:   expiresAt,
+		CreatedAt:   time.Now().UTC(),
+	}
+	m.invites[token] = created
+	logID, _ := uuid.NewV7()
+	m.auditLogs = append([]sqlc.ListWorkspaceAuditLogsWithUserRow{{
+		ID:          logID,
+		UserID:      uuid.NullUUID{UUID: userID, Valid: true},
+		WorkspaceID: uuid.NullUUID{UUID: workspaceID, Valid: true},
+		Action:      "MEMBER_INVITE_CREATED",
+		IpAddress:   ipAddr,
+		CreatedAt:   time.Now().UTC(),
+		ActorName:   owner.FullName,
+		ActorEmail:  owner.Email,
+	}}, m.auditLogs...)
+	return created, ws, nil
+}
+
+func (m *memoryLedgerStore) JoinWorkspaceByTokenTx(
+	_ context.Context,
+	userID uuid.UUID,
+	token, ipAddr string,
+) (sqlc.Workspace, sqlc.User, []sqlc.ListWorkspacesByUserIDRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inv, ok := m.invites[token]
+	if !ok || inv.RevokedAt.Valid || inv.UsedBy.Valid || time.Now().UTC().After(inv.ExpiresAt) {
+		return sqlc.Workspace{}, sqlc.User{}, nil, ledger.ErrInviteExpiredOrUsed
+	}
+	if _, exists := m.members[inv.WorkspaceID][userID]; exists {
+		return sqlc.Workspace{}, sqlc.User{}, nil, ledger.ErrAlreadyMember
+	}
+	ws := m.workspaces[inv.WorkspaceID]
+	owner := m.users[ws.OwnerID]
+	maxMembers := 2
+	if owner.PlanTier == "umkm_pro" || owner.PlanTier == "keluarga_pro" {
+		maxMembers = 5
+	}
+	if len(m.members[inv.WorkspaceID]) >= maxMembers {
+		return sqlc.Workspace{}, sqlc.User{}, nil, ledger.ErrMemberLimitReached
+	}
+	m.members[inv.WorkspaceID][userID] = "editor"
+	inv.UsedBy = uuid.NullUUID{UUID: userID, Valid: true}
+	inv.UsedAt = pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
+	m.invites[token] = inv
+
+	u := m.users[userID]
+	logID, _ := uuid.NewV7()
+	metaBytes, _ := json.Marshal(map[string]any{"member_name": u.FullName})
+	m.auditLogs = append([]sqlc.ListWorkspaceAuditLogsWithUserRow{{
+		ID:           logID,
+		UserID:       uuid.NullUUID{UUID: userID, Valid: true},
+		WorkspaceID:  uuid.NullUUID{UUID: inv.WorkspaceID, Valid: true},
+		Action:       "MEMBER_JOINED",
+		IpAddress:    ipAddr,
+		MetadataJson: metaBytes,
+		CreatedAt:    time.Now().UTC(),
+		ActorName:    u.FullName,
+		ActorEmail:   u.Email,
+	}}, m.auditLogs...)
+
+	return ws, u, m.buildWorkspaceRowsLocked(userID), nil
+}
+
+func (m *memoryLedgerStore) RemoveMemberTx(
+	_ context.Context,
+	ownerID, workspaceID, targetUserID uuid.UUID,
+	ipAddr string,
+) ([]sqlc.ListWorkspaceMembersWithProfileRow, sqlc.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.members[workspaceID][ownerID] != "owner" {
+		return nil, sqlc.User{}, ledger.ErrForbidden
+	}
+	role, exists := m.members[workspaceID][targetUserID]
+	if !exists || role == "owner" {
+		return nil, sqlc.User{}, ledger.ErrNotFound
+	}
+	target := m.users[targetUserID]
+	delete(m.members[workspaceID], targetUserID)
+
+	owner := m.users[ownerID]
+	logID, _ := uuid.NewV7()
+	metaBytes, _ := json.Marshal(map[string]any{"removed_user_name": target.FullName})
+	m.auditLogs = append([]sqlc.ListWorkspaceAuditLogsWithUserRow{{
+		ID:           logID,
+		UserID:       uuid.NullUUID{UUID: ownerID, Valid: true},
+		WorkspaceID:  uuid.NullUUID{UUID: workspaceID, Valid: true},
+		Action:       "MEMBER_REMOVED",
+		IpAddress:    ipAddr,
+		MetadataJson: metaBytes,
+		CreatedAt:    time.Now().UTC(),
+		ActorName:    owner.FullName,
+		ActorEmail:   owner.Email,
+	}}, m.auditLogs...)
+
+	return m.buildMemberRowsLocked(workspaceID), owner, nil
+}
+
+func (m *memoryLedgerStore) ListActivityLogs(
+	_ context.Context,
+	userID, workspaceID uuid.UUID,
+	limit, offset int32,
+) ([]sqlc.ListWorkspaceAuditLogsWithUserRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.members[workspaceID][userID] != "owner" {
+		return nil, ledger.ErrForbidden
+	}
+	var matching []sqlc.ListWorkspaceAuditLogsWithUserRow
+	for _, l := range m.auditLogs {
+		if l.WorkspaceID.Valid && l.WorkspaceID.UUID == workspaceID {
+			matching = append(matching, l)
+		}
+	}
+	if int(offset) >= len(matching) {
+		return nil, nil
+	}
+	sliced := matching[offset:]
+	if int32(len(sliced)) > limit {
+		sliced = sliced[:limit]
+	}
+	return sliced, nil
 }
 
 func TestWorkspacesQuotaCustomAndCashTransactions(t *testing.T) {
@@ -409,5 +642,164 @@ func TestWorkspacesQuotaCustomAndCashTransactions(t *testing.T) {
 	r.ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on soft-delete transaction, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+}
+
+func TestSingleUseInviteLinkMemberLimitAndOwnerActivityLogs(t *testing.T) {
+	jwtMgr, _ := jwtutil.NewManager("0123456789abcdef0123456789abcdef_strong_key!", 15*time.Minute)
+	store := newMemoryLedgerStore()
+	svc := ledger.NewService(store)
+	h := ledger.NewHandler(svc)
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequireAuth(jwtMgr))
+	r.Post("/api/v1/workspaces/join", h.JoinWorkspace)
+	r.Get("/api/v1/workspaces/{workspaceID}/members", h.ListMembers)
+	r.Post("/api/v1/workspaces/{workspaceID}/invites", h.CreateInvite)
+	r.Delete("/api/v1/workspaces/{workspaceID}/members/{memberUserID}", h.RemoveMember)
+	r.Get("/api/v1/workspaces/{workspaceID}/activity-logs", h.ListActivityLogs)
+
+	ownerID, _ := uuid.NewV7()
+	admin1ID, _ := uuid.NewV7()
+	admin2ID, _ := uuid.NewV7()
+	wsID, _ := uuid.NewV7()
+
+	store.seedUserWithDefaultWorkspace(ownerID, wsID, "starter")
+	store.seedUser(admin1ID, "rian@ucapkas.id", "Rian Pratama", "starter")
+	store.seedUser(admin2ID, "siti@ucapkas.id", "Siti Aminah", "starter")
+
+	ownerToken, _, _ := jwtMgr.GenerateAccessToken(ownerID)
+	admin1Token, _, _ := jwtMgr.GenerateAccessToken(admin1ID)
+	admin2Token, _, _ := jwtMgr.GenerateAccessToken(admin2ID)
+
+	// 1. Owner generates a 24h single-use WA invite link
+	invReq := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+wsID.String()+"/invites", nil)
+	invReq.Header.Set("Authorization", "Bearer "+ownerToken)
+	invRec := httptest.NewRecorder()
+	r.ServeHTTP(invRec, invReq)
+	if invRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created on CreateInvite, got %d: %s", invRec.Code, invRec.Body.String())
+	}
+
+	var invResp struct {
+		Data struct {
+			Invite ledger.WorkspaceInviteDTO `json:"invite"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(invRec.Body.Bytes(), &invResp); err != nil {
+		t.Fatalf("unmarshal invResp: %v", err)
+	}
+	if invResp.Data.Invite.Token == "" || invResp.Data.Invite.InviteURL == "" {
+		t.Fatalf("expected non-empty invite token and URL, got %+v", invResp.Data.Invite)
+	}
+
+	// 2. Admin1 joins using the full WA invite URL -> 200 OK
+	joinBody, _ := json.Marshal(map[string]string{"token": invResp.Data.Invite.InviteURL})
+	joinReq1 := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/join", bytes.NewReader(joinBody))
+	joinReq1.Header.Set("Authorization", "Bearer "+admin1Token)
+	joinRec1 := httptest.NewRecorder()
+	r.ServeHTTP(joinRec1, joinReq1)
+	if joinRec1.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on first join, got %d: %s", joinRec1.Code, joinRec1.Body.String())
+	}
+
+	// 3. Admin2 tries to join using the EXACT SAME invite link -> MUST fail with 410 Gone (single-use lock!)
+	joinReq2 := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/join", bytes.NewReader(joinBody))
+	joinReq2.Header.Set("Authorization", "Bearer "+admin2Token)
+	joinRec2 := httptest.NewRecorder()
+	r.ServeHTTP(joinRec2, joinReq2)
+	if joinRec2.Code != http.StatusGone {
+		t.Fatalf("expected 410 Gone when reusing single-use invite link, got %d: %s", joinRec2.Code, joinRec2.Body.String())
+	}
+
+	// 4. Starter plan member cap is 2 (1 Owner + 1 Admin): Owner tries to create another invite -> 403 MEMBER_LIMIT_REACHED
+	invReq2 := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+wsID.String()+"/invites", nil)
+	invReq2.Header.Set("Authorization", "Bearer "+ownerToken)
+	invRec2 := httptest.NewRecorder()
+	r.ServeHTTP(invRec2, invReq2)
+	if invRec2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when Starter workspace has 2/2 members, got %d: %s", invRec2.Code, invRec2.Body.String())
+	}
+
+	// 5. Activity Logs: Admin1 (editor) CANNOT view Activity Logs -> 403 Forbidden
+	adminLogReq := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/"+wsID.String()+"/activity-logs", nil)
+	adminLogReq.Header.Set("Authorization", "Bearer "+admin1Token)
+	adminLogRec := httptest.NewRecorder()
+	r.ServeHTTP(adminLogRec, adminLogReq)
+	if adminLogRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for Admin viewing activity logs, got %d", adminLogRec.Code)
+	}
+
+	// 6. Activity Logs: Owner CAN view Activity Logs -> 200 OK with invite & join events
+	ownerLogReq := httptest.NewRequest(http.MethodGet, "/api/v1/workspaces/"+wsID.String()+"/activity-logs", nil)
+	ownerLogReq.Header.Set("Authorization", "Bearer "+ownerToken)
+	ownerLogRec := httptest.NewRecorder()
+	r.ServeHTTP(ownerLogRec, ownerLogReq)
+	if ownerLogRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for Owner viewing activity logs, got %d: %s", ownerLogRec.Code, ownerLogRec.Body.String())
+	}
+	var logResp struct {
+		Data struct {
+			Logs []ledger.WorkspaceActivityLogDTO `json:"logs"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(ownerLogRec.Body.Bytes(), &logResp)
+	if len(logResp.Data.Logs) < 2 {
+		t.Fatalf("expected at least 2 activity log entries, got %d", len(logResp.Data.Logs))
+	}
+
+	// 7. Owner removes Admin1 -> 200 OK, member count drops to 1
+	remReq := httptest.NewRequest(http.MethodDelete, "/api/v1/workspaces/"+wsID.String()+"/members/"+admin1ID.String(), nil)
+	remReq.Header.Set("Authorization", "Bearer "+ownerToken)
+	remRec := httptest.NewRecorder()
+	r.ServeHTTP(remRec, remReq)
+	if remRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on RemoveMember, got %d: %s", remRec.Code, remRec.Body.String())
+	}
+}
+
+func TestWorkspaceQuickCategoriesLimit3(t *testing.T) {
+	jwtMgr, _ := jwtutil.NewManager("0123456789abcdef0123456789abcdef_strong_key!", 15*time.Minute)
+	store := newMemoryLedgerStore()
+	svc := ledger.NewService(store)
+	h := ledger.NewHandler(svc)
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequireAuth(jwtMgr))
+	r.Patch("/api/v1/workspaces/{workspaceID}", h.UpdateWorkspace)
+
+	userID := uuid.MustParse("01932c00-0000-7000-8000-000000000090")
+	wsID := uuid.MustParse("01932c00-0000-7000-8000-000000000099")
+	store.seedUserWithDefaultWorkspace(userID, wsID, "umkm_pro")
+
+	token, _, _ := jwtMgr.GenerateAccessToken(userID)
+
+	patchPayload, _ := json.Marshal(map[string]any{
+		"name":             "Bengkel Maju",
+		"short_name":       "Bengkel Maju",
+		"focus_type":       "umkm",
+		"quick_categories": []string{"Ganti Oli", "Tune Up", "Suku Cadang", "Kategori Keempat Diabaikan"},
+	})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/v1/workspaces/"+wsID.String(), bytes.NewReader(patchPayload))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchRec := httptest.NewRecorder()
+	r.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on PATCH workspace, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	var resp struct {
+		Data struct {
+			Workspace struct {
+				QuickCategories []string `json:"quick_categories"`
+			} `json:"workspace"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	got := resp.Data.Workspace.QuickCategories
+	if len(got) != 3 || got[0] != "Ganti Oli" || got[1] != "Tune Up" || got[2] != "Suku Cadang" {
+		t.Fatalf("expected 3 quick categories [Ganti Oli, Tune Up, Suku Cadang], got %v", got)
 	}
 }

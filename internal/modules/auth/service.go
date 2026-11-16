@@ -104,6 +104,16 @@ func (s *PgStore) UpsertUserAndDefaultWorkspaceTx(
 		}); err != nil {
 			return sqlc.User{}, nil, err
 		}
+		defaultCatsJSON, _ := json.Marshal(DefaultQuickCategories(params.FocusType))
+		if _, err := qtx.UpdateWorkspaceCustom(ctx, sqlc.UpdateWorkspaceCustomParams{
+			ID:              createdWs.ID,
+			Name:            createdWs.Name,
+			ShortName:       createdWs.ShortName,
+			FocusType:       createdWs.FocusType,
+			QuickCategories: defaultCatsJSON,
+		}); err != nil {
+			return sqlc.User{}, nil, err
+		}
 		wsList, err = qtx.ListWorkspacesByUserID(ctx, user.ID)
 		if err != nil {
 			return sqlc.User{}, nil, err
@@ -233,18 +243,67 @@ type UserDTO struct {
 }
 
 type WorkspaceDTO struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	ShortName         string `json:"short_name"`
-	FocusType         string `json:"focus_type"`
-	BankName          string `json:"bank_name"`
-	BankAccountNumber string `json:"bank_account_number"`
-	BankAccountHolder string `json:"bank_account_holder"`
-	Role              string `json:"role"`
-	Balance           int64  `json:"balance"`
-	MonthlyInflow     int64  `json:"monthly_inflow"`
-	MonthlyOutflow    int64  `json:"monthly_outflow"`
-	IsPro             bool   `json:"is_pro"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	ShortName          string   `json:"short_name"`
+	FocusType          string   `json:"focus_type"`
+	BankName           string   `json:"bank_name"`
+	BankAccountNumber  string   `json:"bank_account_number"`
+	BankAccountHolder  string   `json:"bank_account_holder"`
+	LogoURL            string   `json:"logo_url"`
+	QuickCategories    []string `json:"quick_categories"`
+	Role               string   `json:"role"`
+	Balance            int64    `json:"balance"`
+	MonthlyInflow      int64    `json:"monthly_inflow"`
+	MonthlyOutflow     int64    `json:"monthly_outflow"`
+	PrevMonthlyInflow  int64    `json:"prev_monthly_inflow"`
+	PrevMonthlyOutflow int64    `json:"prev_monthly_outflow"`
+	IsPro              bool     `json:"is_pro"`
+}
+
+func DefaultQuickCategories(focusType string) []string {
+	switch strings.ToLower(strings.TrimSpace(focusType)) {
+	case "rumah_tangga":
+		return []string{"Belanja Dapur", "Tagihan & Listrik", "Kebutuhan Anak"}
+	case "komunitas":
+		return []string{"Iuran Kas", "Konsumsi", "Perlengkapan"}
+	default:
+		return []string{"Servis", "Bahan Baku", "Operasional"}
+	}
+}
+
+func NormalizeQuickCategories(focusType string, raw []string) []string {
+	defaults := DefaultQuickCategories(focusType)
+	out := make([]string, 0, 3)
+	for _, item := range raw {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		runes := []rune(trimmed)
+		if len(runes) > 30 {
+			trimmed = string(runes[:30])
+		}
+		out = append(out, trimmed)
+		if len(out) == 3 {
+			break
+		}
+	}
+	for i := len(out); i < 3; i++ {
+		out = append(out, defaults[i])
+	}
+	return out
+}
+
+func ParseQuickCategoriesJSON(focusType string, rawJSON []byte) []string {
+	if len(rawJSON) == 0 {
+		return DefaultQuickCategories(focusType)
+	}
+	var parsed []string
+	if err := json.Unmarshal(rawJSON, &parsed); err != nil {
+		return DefaultQuickCategories(focusType)
+	}
+	return NormalizeQuickCategories(focusType, parsed)
 }
 
 type AuthBundleDTO struct {
@@ -301,10 +360,16 @@ func normalizeFocus(raw string) (focus, wsName, shortName string) {
 func (s *Service) LoginWithGoogle(
 	ctx context.Context,
 	rawIDToken, selectedFocus, deviceName, ipAddr string,
+	fallbackAvatar ...string,
 ) (*AuthBundleDTO, error) {
 	claims, err := s.googleVerifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		return nil, ErrInvalidGoogleToken
+	}
+
+	avatarURL := strings.TrimSpace(claims.Picture)
+	if avatarURL == "" && len(fallbackAvatar) > 0 {
+		avatarURL = strings.TrimSpace(fallbackAvatar[0])
 	}
 
 	newUserID, err := uuid.NewV7()
@@ -334,7 +399,7 @@ func (s *Service) LoginWithGoogle(
 		GoogleSub:            claims.Subject,
 		Email:                claims.Email,
 		FullName:             claims.FullName,
-		AvatarURL:            claims.Picture,
+		AvatarURL:            avatarURL,
 		NewWorkspaceID:       newWsID,
 		DefaultWorkspaceName: wsName,
 		DefaultShortName:     shortName,
@@ -452,19 +517,27 @@ func toWorkspaceDTOs(rows []sqlc.ListWorkspacesByUserIDRow, planTier string) []W
 	isPro := planTier == "umkm_pro" || planTier == "keluarga_pro"
 	out := make([]WorkspaceDTO, 0, len(rows))
 	for _, r := range rows {
+		logoURL := ""
+		if isPro {
+			logoURL = r.LogoUrl
+		}
 		out = append(out, WorkspaceDTO{
-			ID:                r.ID.String(),
-			Name:              r.Name,
-			ShortName:         r.ShortName,
-			FocusType:         r.FocusType,
-			BankName:          r.BankName,
-			BankAccountNumber: r.BankAccountNumber,
-			BankAccountHolder: r.BankAccountHolder,
-			Role:              r.Role,
-			Balance:           r.Balance,
-			MonthlyInflow:     r.MonthlyInflow,
-			MonthlyOutflow:    r.MonthlyOutflow,
-			IsPro:             isPro,
+			ID:                 r.ID.String(),
+			Name:               r.Name,
+			ShortName:          r.ShortName,
+			FocusType:          r.FocusType,
+			BankName:           r.BankName,
+			BankAccountNumber:  r.BankAccountNumber,
+			BankAccountHolder:  r.BankAccountHolder,
+			LogoURL:            logoURL,
+			QuickCategories:    ParseQuickCategoriesJSON(r.FocusType, r.QuickCategories),
+			Role:               r.Role,
+			Balance:            r.Balance,
+			MonthlyInflow:      r.MonthlyInflow,
+			MonthlyOutflow:     r.MonthlyOutflow,
+			PrevMonthlyInflow:  r.PrevMonthlyInflow,
+			PrevMonthlyOutflow: r.PrevMonthlyOutflow,
+			IsPro:              isPro,
 		})
 	}
 	return out

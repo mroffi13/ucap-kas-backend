@@ -64,7 +64,7 @@ services:
       ALLOW_DEV_MOCK_AUTH: "false"
       AI_GATEWAY_URL: ${AI_GATEWAY_URL:-http://bifrost:8080/v1}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "8080:8080"
 
 volumes:
   pgdata:

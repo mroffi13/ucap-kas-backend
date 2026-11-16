@@ -93,6 +93,8 @@ type Workspace struct {
 	BankName          string    `json:"bank_name"`
 	BankAccountNumber string    `json:"bank_account_number"`
 	BankAccountHolder string    `json:"bank_account_holder"`
+	LogoUrl           string    `json:"logo_url"`
+	QuickCategories   []byte    `json:"quick_categories"`
 	IsDefault         bool      `json:"is_default"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
@@ -103,6 +105,19 @@ type WorkspaceMember struct {
 	UserID      uuid.UUID `json:"user_id"`
 	Role        string    `json:"role"`
 	JoinedAt    time.Time `json:"joined_at"`
+}
+
+type WorkspaceInvite struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CreatedBy   uuid.UUID          `json:"created_by"`
+	Token       string             `json:"token"`
+	Role        string             `json:"role"`
+	ExpiresAt   time.Time          `json:"expires_at"`
+	UsedBy      uuid.NullUUID      `json:"used_by"`
+	UsedAt      pgtype.Timestamptz `json:"used_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt   time.Time          `json:"created_at"`
 }
 
 type Invoice struct {

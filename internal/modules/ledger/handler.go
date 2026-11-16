@@ -232,3 +232,207 @@ func (h *Handler) DeleteTransaction(w http.ResponseWriter, r *http.Request) {
 		"workspaces": workspaces,
 	})
 }
+
+func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Tidak terautentikasi.")
+		return
+	}
+
+	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_UUID", "ID Buku Kas tidak valid.")
+		return
+	}
+
+	bundle, err := h.svc.ListMembers(r.Context(), uid, wsID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrForbidden):
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Anda tidak memiliki akses ke Buku Kas ini.")
+		case errors.Is(err, ErrNotFound):
+			response.Error(w, http.StatusNotFound, "NOT_FOUND", "Buku Kas tidak ditemukan.")
+		default:
+			response.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Gagal memuat daftar anggota.")
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, bundle)
+}
+
+func (h *Handler) CreateInvite(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Tidak terautentikasi.")
+		return
+	}
+
+	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_UUID", "ID Buku Kas tidak valid.")
+		return
+	}
+
+	inv, err := h.svc.CreateInvite(r.Context(), uid, wsID, middleware.ClientIP(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrForbidden):
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Hanya pemilik Buku Kas yang dapat membuat tautan undangan.")
+		case errors.Is(err, ErrMemberLimitReached):
+			response.Error(
+				w,
+				http.StatusForbidden,
+				"MEMBER_LIMIT_REACHED",
+				"Jumlah anggota Buku Kas telah mencapai batas paket (Starter maks 2 orang, Pro maks 5 orang). Upgrade ke Paket Pro untuk menambah anggota.",
+			)
+		case errors.Is(err, ErrNotFound):
+			response.Error(w, http.StatusNotFound, "NOT_FOUND", "Buku Kas tidak ditemukan.")
+		default:
+			response.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Gagal membuat tautan undangan.")
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusCreated, map[string]any{
+		"invite": inv,
+	})
+}
+
+type joinWorkspaceRequest struct {
+	Token string `json:"token"`
+}
+
+func (h *Handler) JoinWorkspace(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Tidak terautentikasi.")
+		return
+	}
+
+	var req joinWorkspaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_PAYLOAD", "Format permintaan tidak valid.")
+		return
+	}
+
+	joinedWs, workspaces, err := h.svc.JoinWorkspaceByToken(r.Context(), uid, req.Token, middleware.ClientIP(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrValidation):
+			response.Error(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		case errors.Is(err, ErrInviteExpiredOrUsed):
+			response.Error(
+				w,
+				http.StatusGone,
+				"INVITE_EXPIRED_OR_USED",
+				"Tautan undangan ini sudah pernah digunakan atau telah kedaluwarsa (lewat 24 jam). Minta pemilik Buku Kas membuat tautan undangan baru dari aplikasi.",
+			)
+		case errors.Is(err, ErrAlreadyMember):
+			response.Error(
+				w,
+				http.StatusConflict,
+				"ALREADY_MEMBER",
+				"Akun Anda sudah terdaftar sebagai anggota di Buku Kas ini.",
+			)
+		case errors.Is(err, ErrMemberLimitReached):
+			response.Error(
+				w,
+				http.StatusForbidden,
+				"MEMBER_LIMIT_REACHED",
+				"Kapasitas anggota Buku Kas ini sudah penuh.",
+			)
+		default:
+			response.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Gagal bergabung ke Buku Kas.")
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]any{
+		"workspace":  joinedWs,
+		"workspaces": workspaces,
+	})
+}
+
+func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Tidak terautentikasi.")
+		return
+	}
+
+	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_UUID", "ID Buku Kas tidak valid.")
+		return
+	}
+
+	targetUserID, err := uuid.Parse(chi.URLParam(r, "memberUserID"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_UUID", "ID anggota tidak valid.")
+		return
+	}
+
+	bundle, err := h.svc.RemoveMember(r.Context(), uid, wsID, targetUserID, middleware.ClientIP(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrValidation):
+			response.Error(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		case errors.Is(err, ErrForbidden):
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Hanya pemilik Buku Kas yang dapat mengeluarkan anggota.")
+		case errors.Is(err, ErrNotFound):
+			response.Error(w, http.StatusNotFound, "NOT_FOUND", "Anggota tidak ditemukan.")
+		default:
+			response.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Gagal mengeluarkan anggota.")
+		}
+		return
+	}
+
+	response.JSON(w, http.StatusOK, bundle)
+}
+
+func (h *Handler) ListActivityLogs(w http.ResponseWriter, r *http.Request) {
+	uid, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Tidak terautentikasi.")
+		return
+	}
+
+	wsID, err := uuid.Parse(chi.URLParam(r, "workspaceID"))
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "INVALID_UUID", "ID Buku Kas tidak valid.")
+		return
+	}
+
+	limit := int32(5)
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 && parsed <= 50 {
+			limit = int32(parsed)
+		}
+	}
+	offset := int32(0)
+	if rawOffset := r.URL.Query().Get("offset"); rawOffset != "" {
+		if parsed, err := strconv.Atoi(rawOffset); err == nil && parsed >= 0 {
+			offset = int32(parsed)
+		}
+	}
+
+	logs, hasMore, err := h.svc.ListActivityLogs(r.Context(), uid, wsID, limit, offset)
+	if err != nil {
+		if errors.Is(err, ErrForbidden) {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Log Aktivitas hanya dapat dilihat oleh pemilik Buku Kas.")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Gagal memuat Log Aktivitas.")
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]any{
+		"logs":        logs,
+		"has_more":    hasMore,
+		"limit":       limit,
+		"offset":      offset,
+		"next_offset": offset + int32(len(logs)),
+	})
+}

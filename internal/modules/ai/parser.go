@@ -153,7 +153,7 @@ Kembalikan HANYA objek JSON valid dengan field:
   "category": "Salah satu dari: Penjualan, Servis, Suku Cadang, Bahan Baku, Operasional, Lainnya",
   "payment_method": "Tunai" atau "QRIS" atau "Transfer",
   "customer_name": "Nama pelanggan jika disebutkan",
-  "customer_contact": "Nomor HP/WA jika disebutkan",
+  "customer_contact": "Nomor HP/WA jika disebutkan (kosongkan \"\" jika tidak disebutkan, jangan isi nomor dummy)",
   "due_date": "Tanggal jatuh tempo jika intent kirim_invoice (default: Jatuh Tempo 7 Hari)",
   "notes": "Catatan tambahan",
   "transcript": "Transkrip kalimat bersih",
@@ -218,13 +218,24 @@ const whisperUmkmPrompt = "Transkrip pembukuan kas UMKM Indonesia dan bahasa pas
 
 func (p *HybridParser) ParseVoice(ctx context.Context, in ParseVoiceInput) (*VoiceParseResult, error) {
 	transcript := strings.TrimSpace(in.Transcript)
+	hasAudio := strings.TrimSpace(in.AudioBase64) != ""
+
+	slog.Info("voice parser started",
+		"has_audio", hasAudio,
+		"audio_b64_len", len(in.AudioBase64),
+		"mime_type", in.MimeType,
+		"initial_transcript", transcript,
+	)
 
 	// Step 1: If audio_base64 is provided, ALWAYS prioritize Whisper STT (Groq whisper-large-v3-turbo or 9Router)
 	// so Whisper's high-accuracy Indonesian + Bahasa Pasar transcription replaces any rough phone STT preview!
-	if strings.TrimSpace(in.AudioBase64) != "" {
+	if hasAudio {
 		if whisperText := p.transcribeAudioWithWhisper(ctx, in.AudioBase64, in.MimeType); whisperText != "" {
 			transcript = whisperText
 			in.Transcript = whisperText
+			slog.Info("voice parser stt transcribed", "transcript", transcript)
+		} else {
+			slog.Warn("voice parser stt returned empty text, falling back to client transcript", "fallback_transcript", transcript)
 		}
 	}
 
@@ -238,7 +249,18 @@ func (p *HybridParser) ParseVoice(ctx context.Context, in ParseVoiceInput) (*Voi
 		for _, gwURL := range p.gatewayURLs() {
 			res, err := p.callGatewayVoice(ctx, gwURL, transcript, p.gatewayAPIKey, gwModel)
 			if err == nil && res != nil && len(res.Items) > 0 {
+				slog.Info("voice parser completed via gateway",
+					"provider", res.Provider,
+					"model", gwModel,
+					"intent", res.Intent,
+					"items_count", len(res.Items),
+					"total_amount", res.TotalAmount,
+					"tokens_used", res.TokensUsed,
+				)
 				return res, nil
+			}
+			if err != nil {
+				slog.Warn("voice parser gateway attempt failed", "url", gwURL, "model", gwModel, "error", err)
 			}
 		}
 	}
@@ -248,7 +270,18 @@ func (p *HybridParser) ParseVoice(ctx context.Context, in ParseVoiceInput) (*Voi
 		res, err := p.callGatewayVoice(ctx, "https://api.groq.com/openai/v1", transcript, p.groqAPIKey, p.groqLLMModel)
 		if err == nil && res != nil && len(res.Items) > 0 {
 			res.Provider = "groq_whisper_llama"
+			slog.Info("voice parser completed via direct groq",
+				"provider", res.Provider,
+				"model", p.groqLLMModel,
+				"intent", res.Intent,
+				"items_count", len(res.Items),
+				"total_amount", res.TotalAmount,
+				"tokens_used", res.TokensUsed,
+			)
 			return res, nil
+		}
+		if err != nil {
+			slog.Warn("voice parser direct groq failed", "model", p.groqLLMModel, "error", err)
 		}
 	}
 
@@ -256,12 +289,31 @@ func (p *HybridParser) ParseVoice(ctx context.Context, in ParseVoiceInput) (*Voi
 	if p.apiKey != "" && (transcript != "" || in.AudioBase64 != "") {
 		res, err := p.callGeminiVoice(ctx, in)
 		if err == nil && res != nil && len(res.Items) > 0 {
+			slog.Info("voice parser completed via gemini",
+				"provider", res.Provider,
+				"model", p.model,
+				"intent", res.Intent,
+				"items_count", len(res.Items),
+				"total_amount", res.TotalAmount,
+				"tokens_used", res.TokensUsed,
+			)
 			return res, nil
+		}
+		if err != nil {
+			slog.Warn("voice parser gemini failed", "model", p.model, "error", err)
 		}
 	}
 
 	// Step 5: Deterministic Bahasa Pasar NLP Engine fallback
-	return ParseVoiceSlangFallback(transcript), nil
+	fallbackRes := ParseVoiceSlangFallback(transcript)
+	slog.Info("voice parser completed via slang fallback",
+		"provider", fallbackRes.Provider,
+		"intent", fallbackRes.Intent,
+		"items_count", len(fallbackRes.Items),
+		"total_amount", fallbackRes.TotalAmount,
+		"transcript", fallbackRes.Transcript,
+	)
+	return fallbackRes, nil
 }
 
 func (p *HybridParser) transcribeAudioWithWhisper(ctx context.Context, audioB64, mimeType string) string {
@@ -1160,6 +1212,12 @@ func normalizeVoiceResult(r *VoiceParseResult, fallbackTranscript string) {
 	if strings.TrimSpace(r.DueDate) == "" {
 		r.DueDate = "Jatuh Tempo 7 Hari"
 	}
+	contactClean := strings.TrimSpace(r.CustomerContact)
+	switch strings.ToLower(contactClean) {
+	case "-", "tidak ada", "tidak disebutkan", "kosong", "null", "n/a", "none", "wa pelanggan", "0812-8890-3344", "0812-xxxx-xxxx":
+		contactClean = ""
+	}
+	r.CustomerContact = contactClean
 	var sum int64
 	for i := range r.Items {
 		if r.Items[i].Quantity <= 0 {

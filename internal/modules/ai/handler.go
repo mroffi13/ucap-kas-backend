@@ -62,13 +62,20 @@ func (h *Handler) ParseVoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.svc.ParseVoice(r.Context(), wsID, userID, req)
+	res, err := h.svc.ParseVoice(r.Context(), wsID, userID, req, middleware.ClientIP(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrForbiddenWorkspace):
 			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Anda tidak memiliki akses ke buku kas ini.")
 		case errors.Is(err, ErrReadOnlyRole):
 			response.Error(w, http.StatusForbidden, "READ_ONLY_ROLE", "Peran viewer tidak dapat menggunakan fitur AI.")
+		case errors.Is(err, ErrAIWeeklyQuotaExceeded):
+			response.Error(
+				w,
+				http.StatusForbidden,
+				"AI_QUOTA_EXCEEDED",
+				"Kuota AI mingguan Paket Starter (4x/minggu) telah habis. Upgrade ke Paket Pro untuk akses Suara & Foto Struk Tanpa Batas.",
+			)
 		case errors.Is(err, ErrAIQuotaExceeded):
 			response.Error(
 				w,
@@ -103,13 +110,20 @@ func (h *Handler) ParseReceipt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.svc.ParseReceipt(r.Context(), wsID, userID, req)
+	res, err := h.svc.ParseReceipt(r.Context(), wsID, userID, req, middleware.ClientIP(r))
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrForbiddenWorkspace):
 			response.Error(w, http.StatusForbidden, "FORBIDDEN", "Anda tidak memiliki akses ke buku kas ini.")
 		case errors.Is(err, ErrReadOnlyRole):
 			response.Error(w, http.StatusForbidden, "READ_ONLY_ROLE", "Peran viewer tidak dapat menggunakan fitur AI.")
+		case errors.Is(err, ErrAIWeeklyQuotaExceeded):
+			response.Error(
+				w,
+				http.StatusForbidden,
+				"AI_QUOTA_EXCEEDED",
+				"Kuota AI mingguan Paket Starter (4x/minggu) telah habis. Upgrade ke Paket Pro untuk akses Suara & Foto Struk Tanpa Batas.",
+			)
 		case errors.Is(err, ErrAIQuotaExceeded):
 			response.Error(
 				w,
